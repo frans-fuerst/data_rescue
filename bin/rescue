@@ -1,6 +1,125 @@
 #!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 import glob
+import os
+import sys
+import errno
+import subprocess
+import time
 
-device_files = glob.glob("/dev/sd*")
+def get_root_device():
 
-print(device_files)
+    for line in subprocess.check_output(['mount', '-l']).split('\n'):
+        parts = line.split(' ')
+        if len(parts) > 2 and parts[2] == '/':
+            return parts[0][:8]
+
+def get_file_size(filename):
+    "Get the file size by seeking at end"
+    try:
+        fd = os.open(filename, os.O_RDONLY)
+    except OSError:
+        return 0
+    try:
+        return os.lseek(fd, 0, os.SEEK_END)
+    except:
+        return 0
+    finally:
+        os.close(fd)
+
+def recover_files(devicefile, destination_folder):
+    size = get_file_size(devicefile)
+    folder = os.path.join(destination_folder, "undelete_" + devicefile[devicefile.rfind('/') + 1:])
+    print('== Versuche undelete auf Partition "%s" (%.1fGB), Ergebnisse nach %s' % (
+        devicefile, size / (1024**3), folder))
+
+    try:
+        ntfsundelete_output = subprocess.check_output(['ntfsundelete', '--scan', devicefile]).split('\n')
+    except:
+        print('==   ntfsundelete konnte nicht auf "%s" angewendet werden' % devicefile)
+        return
+        
+    try:
+        os.makedirs(folder)
+    except:
+        pass
+    os.chdir(folder)
+    files = []
+    
+    for line in ntfsundelete_output:
+        inode = line[:line.find(' ')]
+        name = line[line.rfind(' ') + 1:]
+        try:
+            if not str(int(inode)) == inode or name == '<none>':
+                # print('== überspringe %s' % line)
+                continue
+        except:
+            continue
+        files.append((inode, name))
+    
+    print('==   Starte Wiederherstellung von %d Dateien' % len(files))
+    fails = []
+    for inode, name in files:
+        command = 'ntfsundelete %s -f -q -O -u -T -i %s -o "%s-%s" -d %s' % (
+            devicefile, inode, inode, name, folder)
+        if os.system(command) != 0:
+            fails.append(name)
+    print('==   %d Dateien konnten nicht wiederhergestellt werden: %s' % (len(fails), fails))
+        # break
+    
+def rescue(devicefile, destination_folder):
+    size = get_file_size(devicefile)
+    compressor = 'pigz', 'gz'
+    outfile = "%s-%dgb.%s" % (devicefile[devicefile.rfind('/') + 1:], size / (1024**3), compressor[1])
+    print('== Kopiere und komprimiere "%s" (%.1fGB) nach "%s". Dies kann sehr lange dauern!' % (
+        devicefile, size / (1024**3), outfile))
+    command = 'dd_rescue %s - | %s > %s/%s' % (
+        devicefile, compressor[0], destination_folder, outfile)
+    print('==   starte "%s"' % command)
+
+def main():
+    args = sys.argv[2:]
+    
+    destination_folder = '/run/media/martin/big_data'
+    device_files = glob.glob("/dev/sd*")
+    devices_to_rescue = []
+    root_device = get_root_device()
+    
+    print("== Folgende Partitionen werden gesichert:")
+    for f in device_files:
+        if len(f) == 8:
+            continue
+        if f.startswith(root_device):
+            continue
+            
+        add = args == [] or f in args
+
+        print("==   %s: %.1fGB%s" % (
+            f, get_file_size(f) / (1024**3), "" if add else " - wird übersprungen"))
+        
+        if add:
+            devices_to_rescue.append(f)
+        
+    time.sleep(1)
+
+    for f in devices_to_rescue:
+        rescue(f, destination_folder)
+        time.sleep(1)
+
+    for f in devices_to_rescue:
+        recover_files(f, destination_folder)
+        time.sleep(1)
+        
+if __name__ == "__main__":
+    if not '--real' in sys.argv:
+        logfile = 'out.txt'
+        command = 'sudo %s -u %s --real %s 2>&1 | tee %s' % (
+            sys.executable, __file__, ' '.join(sys.argv[1:]), logfile)
+        print('== Alle Ausgaben werden nach "%s" geschrieben' % logfile)
+        time.sleep(1)
+        print('== starte "%s"' % command)
+        os.system(command)
+    else:
+        main()
+
