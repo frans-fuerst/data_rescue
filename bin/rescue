@@ -1,0 +1,6 @@
+#!/usr/bin/env python
+import glob
+
+device_files = glob.glob("/dev/sd*")
+
+print(device_files)
